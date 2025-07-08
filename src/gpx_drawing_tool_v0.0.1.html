@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GPXファイルお絵かきツール</title>
+    <script src="https://unpkg.com/maplibre-gl@^5.6.1/dist/maplibre-gl.js"></script>
+    <link href="https://unpkg.com/maplibre-gl@^5.6.1/dist/maplibre-gl.css" rel="stylesheet">
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: Arial, sans-serif;
+        }
+        
+        #map {
+            width: 100vw;
+            height: 100vh;
+        }
+        
+        .controls {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            z-index: 1000;
+            background: rgba(255, 255, 255, 0.9);
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        
+        .controls button {
+            display: block;
+            margin: 5px 0;
+            padding: 8px 12px;
+            background: #007cba;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        
+        .controls button:hover {
+            background: #005a87;
+        }
+        
+        .controls button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        
+        .time-modal {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.5);
+            display: none;
+            justify-content: center;
+            align-items: center;
+            z-index: 2000;
+        }
+        
+        .time-modal-content {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            max-width: 400px;
+            width: 90%;
+        }
+        
+        .time-modal input, .time-modal select {
+            width: 100%;
+            padding: 8px;
+            margin: 5px 0;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        
+        .time-modal button {
+            margin: 5px;
+            padding: 8px 16px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        
+        .time-modal .btn-primary {
+            background: #007cba;
+            color: white;
+        }
+        
+        .time-modal .btn-secondary {
+            background: #6c757d;
+            color: white;
+        }
+        
+        .status {
+            margin-top: 10px;
+            padding: 5px;
+            font-size: 12px;
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+    
+    <div class="controls">
+        <button id="drawBtn">GPX軌跡をお絵かきする</button>
+        <button id="timeBtn">開始と終了時間を定義する</button>
+        <button id="interpolateBtn" disabled>描いたGPX軌跡を空間内挿する</button>
+        <button id="exportBtn" disabled>エクスポート</button>
+        <div class="status" id="status">現在地を取得中...</div>
+    </div>
+    
+    <div class="time-modal" id="timeModal">
+        <div class="time-modal-content">
+            <h3>開始と終了時間を定義</h3>
+            <label>開始時間:</label>
+            <input type="datetime-local" id="startTime" step="1">
+            <label>終了時間:</label>
+            <input type="datetime-local" id="endTime" step="1">
+            <label>タイムゾーン:</label>
+            <select id="timezone">
+                <option value="Asia/Tokyo">Asia/Tokyo (JST)</option>
+                <option value="UTC">UTC</option>
+                <option value="America/New_York">America/New_York (EST)</option>
+                <option value="Europe/London">Europe/London (GMT)</option>
+            </select>
+            <div>
+                <button class="btn-primary" onclick="saveTimeSettings()">保存</button>
+                <button class="btn-secondary" onclick="closeTimeModal()">キャンセル</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let map;
+        let isDrawing = false;
+        let drawnCoordinates = [];
+        let startTime = null;
+        let endTime = null;
+        let timezone = 'Asia/Tokyo';
+        let interpolatedPoints = [];
+        
+        // 地図の初期化
+        function initMap(userLocation) {
+            map = new maplibregl.Map({
+                container: 'map',
+                style: 'https://tile.openstreetmap.jp/styles/osm-bright/style.json',
+                center: userLocation,
+                zoom: 15
+            });
+            
+            map.on('load', () => {
+                // ユーザー位置マーカー
+                map.addSource('user-location', {
+                    type: 'geojson',
+                    data: {
+                        type: 'Point',
+                        coordinates: userLocation
+                    }
+                });
+                
+                map.addLayer({
+                    id: 'user-location',
+                    type: 'circle',
+                    source: 'user-location',
+                    paint: {
+                        'circle-radius': 8,
+                        'circle-color': '#007cba',
+                        'circle-stroke-width': 2,
+                        'circle-stroke-color': '#ffffff'
+                    }
+                });
+                
+                // 描画用ライン
+                map.addSource('drawn-line', {
+                    type: 'geojson',
+                    data: {
+                        type: 'Feature',
+                        geometry: {
+                            type: 'LineString',
+                            coordinates: []
+                        }
+                    }
+                });
+                
+                map.addLayer({
+                    id: 'drawn-line',
+                    type: 'line',
+                    source: 'drawn-line',
+                    layout: {
+                        'line-join': 'round',
+                        'line-cap': 'round'
+                    },
+                    paint: {
+                        'line-color': '#ff0000',
+                        'line-width': 3
+                    }
+                });
+                
+                // 内挿点用
+                map.addSource('interpolated-points', {
+                    type: 'geojson',
+                    data: {
+                        type: 'FeatureCollection',
+                        features: []
+                    }
+                });
+                
+                map.addLayer({
+                    id: 'interpolated-points',
+                    type: 'circle',
+                    source: 'interpolated-points',
+                    paint: {
+                        'circle-radius': 2,
+                        'circle-color': '#00ff00',
+                        'circle-opacity': 0.6
+                    }
+                });
+                
+                updateStatus('地図を読み込みました');
+            });
+        }
+        
+        // 現在地取得
+        function getCurrentLocation() {
+            if (navigator.geolocation) {
+                navigator.geolocation.getCurrentPosition(
+                    (position) => {
+                        const userLocation = [position.coords.longitude, position.coords.latitude];
+                        initMap(userLocation);
+                    },
+                    (error) => {
+                        console.error('位置情報の取得に失敗しました:', error);
+                        // デフォルト位置（東京）
+                        initMap([139.6917, 35.6895]);
+                        updateStatus('位置情報の取得に失敗しました。デフォルト位置を使用します。');
+                    }
+                );
+            } else {
+                // デフォルト位置（東京）
+                initMap([139.6917, 35.6895]);
+                updateStatus('位置情報がサポートされていません。デフォルト位置を使用します。');
+            }
+        }
+        
+        // 描画モードの切り替え
+        function toggleDrawing() {
+            isDrawing = !isDrawing;
+            const drawBtn = document.getElementById('drawBtn');
+            
+            if (isDrawing) {
+                drawBtn.textContent = '描画を終了する';
+                drawBtn.style.background = '#dc3545';
+                drawnCoordinates = [];
+                map.on('click', onMapClick);
+                updateStatus('地図をクリックして軌跡を描画してください');
+            } else {
+                drawBtn.textContent = 'GPX軌跡をお絵かきする';
+                drawBtn.style.background = '#007cba';
+                map.off('click', onMapClick);
+                updateStatus('描画を終了しました');
+                
+                if (drawnCoordinates.length > 1) {
+                    document.getElementById('interpolateBtn').disabled = false;
+                }
+            }
+        }
+        
+        // 地図クリック時の処理
+        function onMapClick(e) {
+            if (!isDrawing) return;
+            
+            const coords = [e.lngLat.lng, e.lngLat.lat];
+            drawnCoordinates.push(coords);
+            
+            // ラインを更新
+            map.getSource('drawn-line').setData({
+                type: 'Feature',
+                geometry: {
+                    type: 'LineString',
+                    coordinates: drawnCoordinates
+                }
+            });
+            
+            updateStatus(`点数: ${drawnCoordinates.length}`);
+        }
+        
+        // 時間設定モーダルを開く
+        function openTimeModal() {
+            const modal = document.getElementById('timeModal');
+            const now = new Date();
+            const later = new Date(now.getTime() + 3600000); // 1時間後
+            
+            document.getElementById('startTime').value = formatDateTimeLocal(now);
+            document.getElementById('endTime').value = formatDateTimeLocal(later);
+            document.getElementById('timezone').value = timezone;
+            
+            modal.style.display = 'flex';
+        }
+        
+        // 時間設定を保存
+        function saveTimeSettings() {
+            const startTimeInput = document.getElementById('startTime').value;
+            const endTimeInput = document.getElementById('endTime').value;
+            const timezoneInput = document.getElementById('timezone').value;
+            
+            if (!startTimeInput || !endTimeInput) {
+                alert('開始時間と終了時間を入力してください');
+                return;
+            }
+            
+            startTime = new Date(startTimeInput);
+            endTime = new Date(endTimeInput);
+            timezone = timezoneInput;
+            
+            if (startTime >= endTime) {
+                alert('終了時間は開始時間より後に設定してください');
+                return;
+            }
+            
+            closeTimeModal();
+            updateStatus(`時間設定完了: ${startTime.toLocaleString()} - ${endTime.toLocaleString()}`);
+        }
+        
+        // モーダルを閉じる
+        function closeTimeModal() {
+            document.getElementById('timeModal').style.display = 'none';
+        }
+        
+        // 空間内挿
+        function interpolateTrack() {
+            if (drawnCoordinates.length < 2) {
+                alert('2点以上の軌跡を描画してください');
+                return;
+            }
+            
+            if (!startTime || !endTime) {
+                alert('開始時間と終了時間を設定してください');
+                return;
+            }
+            
+            const totalDuration = (endTime - startTime) / 1000; // 秒
+            const totalDistance = calculateTotalDistance(drawnCoordinates);
+            
+            interpolatedPoints = [];
+            let currentDistance = 0;
+            
+            for (let i = 0; i < drawnCoordinates.length - 1; i++) {
+                const start = drawnCoordinates[i];
+                const end = drawnCoordinates[i + 1];
+                const segmentDistance = calculateDistance(start, end);
+                
+                const segmentPoints = Math.ceil(segmentDistance / totalDistance * totalDuration);
+                
+                for (let j = 0; j < segmentPoints; j++) {
+                    const ratio = j / segmentPoints;
+                    const interpolatedCoord = [
+                        start[0] + (end[0] - start[0]) * ratio,
+                        start[1] + (end[1] - start[1]) * ratio
+                    ];
+                    
+                    const timeOffset = (currentDistance / totalDistance) * totalDuration * 1000;
+                    const pointTime = new Date(startTime.getTime() + timeOffset);
+                    
+                    interpolatedPoints.push({
+                        coordinates: interpolatedCoord,
+                        time: pointTime
+                    });
+                    
+                    currentDistance += segmentDistance / segmentPoints;
+                }
+            }
+            
+            // 最後の点を追加
+            interpolatedPoints.push({
+                coordinates: drawnCoordinates[drawnCoordinates.length - 1],
+                time: endTime
+            });
+            
+            // 内挿点を地図に表示
+            const features = interpolatedPoints.map(point => ({
+                type: 'Feature',
+                geometry: {
+                    type: 'Point',
+                    coordinates: point.coordinates
+                }
+            }));
+            
+            map.getSource('interpolated-points').setData({
+                type: 'FeatureCollection',
+                features: features
+            });
+            
+            document.getElementById('exportBtn').disabled = false;
+            updateStatus(`内挿完了: ${interpolatedPoints.length}点生成`);
+        }
+        
+        // 距離計算（簡易版）
+        function calculateDistance(coord1, coord2) {
+            const R = 6371000; // 地球の半径（メートル）
+            const dLat = (coord2[1] - coord1[1]) * Math.PI / 180;
+            const dLon = (coord2[0] - coord1[0]) * Math.PI / 180;
+            const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                      Math.cos(coord1[1] * Math.PI / 180) * Math.cos(coord2[1] * Math.PI / 180) *
+                      Math.sin(dLon/2) * Math.sin(dLon/2);
+            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+            return R * c;
+        }
+        
+        // 総距離計算
+        function calculateTotalDistance(coordinates) {
+            let totalDistance = 0;
+            for (let i = 0; i < coordinates.length - 1; i++) {
+                totalDistance += calculateDistance(coordinates[i], coordinates[i + 1]);
+            }
+            return totalDistance;
+        }
+        
+        // GPXエクスポート
+        function exportGPX() {
+            if (interpolatedPoints.length === 0) {
+                alert('内挿を実行してからエクスポートしてください');
+                return;
+            }
+            
+            const gpxContent = generateGPX(interpolatedPoints);
+            const blob = new Blob([gpxContent], { type: 'application/gpx+xml' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `gpx_track_${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.gpx`;
+            a.click();
+            URL.revokeObjectURL(url);
+            
+            updateStatus('GPXファイルをエクスポートしました');
+        }
+        
+        // GPX生成
+        function generateGPX(points) {
+            let gpx = `<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="GPX Drawing Tool" xmlns="http://www.topografix.com/GPX/1/1">
+<trk>
+<name>Drawn Track</name>
+<trkseg>`;
+            
+            points.forEach(point => {
+                const timeStr = point.time.toISOString();
+                gpx += `
+<trkpt lat="${point.coordinates[1]}" lon="${point.coordinates[0]}">
+<time>${timeStr}</time>
+</trkpt>`;
+            });
+            
+            gpx += `
+</trkseg>
+</trk>
+</gpx>`;
+            
+            return gpx;
+        }
+        
+        // 日時をinputのdatetime-local形式に変換
+        function formatDateTimeLocal(date) {
+            const year = date.getFullYear();
+            const month = String(date.getMonth() + 1).padStart(2, '0');
+            const day = String(date.getDate()).padStart(2, '0');
+            const hours = String(date.getHours()).padStart(2, '0');
+            const minutes = String(date.getMinutes()).padStart(2, '0');
+            const seconds = String(date.getSeconds()).padStart(2, '0');
+            return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}`;
+        }
+        
+        // ステータス更新
+        function updateStatus(message) {
+            document.getElementById('status').textContent = message;
+        }
+        
+        // イベントリスナー
+        document.getElementById('drawBtn').addEventListener('click', toggleDrawing);
+        document.getElementById('timeBtn').addEventListener('click', openTimeModal);
+        document.getElementById('interpolateBtn').addEventListener('click', interpolateTrack);
+        document.getElementById('exportBtn').addEventListener('click', exportGPX);
+        
+        // 初期化
+        getCurrentLocation();
+    </script>
+</body>
+</html>

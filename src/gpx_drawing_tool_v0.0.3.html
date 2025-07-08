@@ -1,0 +1,856 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GPXファイルお絵かきツール</title>
+    <script src="https://unpkg.com/maplibre-gl@^5.6.1/dist/maplibre-gl.js"></script>
+    <link href="https://unpkg.com/maplibre-gl@^5.6.1/dist/maplibre-gl.css" rel="stylesheet">
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: Arial, sans-serif;
+        }
+        
+        #map {
+            width: 100vw;
+            height: 100vh;
+        }
+        
+        .controls {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            z-index: 1000;
+            background: rgba(255, 255, 255, 0.9);
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        
+        .controls button {
+            display: block;
+            margin: 5px 0;
+            padding: 8px 12px;
+            background: #007cba;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            flex: 1;
+        }
+        
+        .context-menu {
+            position: absolute;
+            background: white;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+            z-index: 1000;
+            display: none;
+            min-width: 120px;
+        }
+        
+        .context-menu-item {
+            padding: 8px 12px;
+            cursor: pointer;
+            border-bottom: 1px solid #eee;
+        }
+        
+        .context-menu-item:hover {
+            background: #f0f0f0;
+        }
+        
+        .context-menu-item:last-child {
+            border-bottom: none;
+        }
+        
+        .controls button:hover {
+            background: #005a87;
+        }
+        
+        .controls button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        
+        .time-modal {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.5);
+            display: none;
+            justify-content: center;
+            align-items: center;
+            z-index: 2000;
+        }
+        
+        .time-modal-content {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            max-width: 400px;
+            width: 90%;
+        }
+        
+        .time-modal input, .time-modal select {
+            width: 100%;
+            padding: 8px;
+            margin: 5px 0;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        
+        .time-modal button {
+            margin: 5px;
+            padding: 8px 16px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        
+        .time-modal .btn-primary {
+            background: #007cba;
+            color: white;
+        }
+        
+        .time-modal .btn-secondary {
+            background: #6c757d;
+            color: white;
+        }
+        
+        .status {
+            margin-top: 10px;
+            padding: 5px;
+            font-size: 12px;
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+    
+    <div class="controls">
+        <button id="drawBtn">GPX軌跡をお絵かきする</button>
+        <div style="display: flex; gap: 5px; margin: 5px 0;">
+            <button id="undoBtn" disabled>Undo</button>
+            <button id="redoBtn" disabled>Redo</button>
+            <button id="resetBtn" disabled>リセット</button>
+        </div>
+        <button id="timeBtn">開始と終了時間を定義する</button>
+        <button id="interpolateBtn" disabled>描いたGPX軌跡を空間内挿する</button>
+        <button id="exportBtn" disabled>エクスポート</button>
+        <div class="status" id="status">現在地を取得中...</div>
+    </div>
+    
+    <div class="time-modal" id="timeModal">
+        <div class="time-modal-content">
+            <h3>開始と終了時間を定義</h3>
+            <label>開始時間:</label>
+            <input type="datetime-local" id="startTime" step="1">
+            <label>終了時間:</label>
+            <input type="datetime-local" id="endTime" step="1">
+            <label>タイムゾーン:</label>
+            <select id="timezone">
+                <option value="Asia/Tokyo">Asia/Tokyo (JST)</option>
+                <option value="UTC">UTC</option>
+                <option value="America/New_York">America/New_York (EST)</option>
+                <option value="Europe/London">Europe/London (GMT)</option>
+            </select>
+            <div>
+                <button class="btn-primary" onclick="saveTimeSettings()">保存</button>
+                <button class="btn-secondary" onclick="closeTimeModal()">キャンセル</button>
+            </div>
+        </div>
+    </div>
+    
+    <div class="context-menu" id="contextMenu">
+        <div class="context-menu-item" onclick="confirmEdit()">編集を確定</div>
+    </div>
+
+    <script>
+        let map;
+        let isDrawing = false;
+        let isEditing = false;
+        let drawnCoordinates = [];
+        let undoStack = [];
+        let redoStack = [];
+        let startTime = null;
+        let endTime = null;
+        let timezone = 'Asia/Tokyo';
+        let interpolatedPoints = [];
+        let editingPoints = [];
+        let midPoints = [];
+        let draggedMidPoint = null;
+        
+        // 地図の初期化
+        function initMap(userLocation) {
+            map = new maplibregl.Map({
+                container: 'map',
+                style: 'https://tile.openstreetmap.jp/styles/osm-bright/style.json',
+                center: userLocation,
+                zoom: 15
+            });
+            
+            map.on('load', () => {
+                // ユーザー位置マーカー
+                map.addSource('user-location', {
+                    type: 'geojson',
+                    data: {
+                        type: 'Point',
+                        coordinates: userLocation
+                    }
+                });
+                
+                map.addLayer({
+                    id: 'user-location',
+                    type: 'circle',
+                    source: 'user-location',
+                    paint: {
+                        'circle-radius': 8,
+                        'circle-color': '#007cba',
+                        'circle-stroke-width': 2,
+                        'circle-stroke-color': '#ffffff'
+                    }
+                });
+                
+                // 描画用ライン
+                map.addSource('drawn-line', {
+                    type: 'geojson',
+                    data: {
+                        type: 'Feature',
+                        geometry: {
+                            type: 'LineString',
+                            coordinates: []
+                        }
+                    }
+                });
+                
+                map.addLayer({
+                    id: 'drawn-line',
+                    type: 'line',
+                    source: 'drawn-line',
+                    layout: {
+                        'line-join': 'round',
+                        'line-cap': 'round'
+                    },
+                    paint: {
+                        'line-color': '#ff0000',
+                        'line-width': 3
+                    }
+                });
+                
+                // 内挿点用
+                map.addSource('interpolated-points', {
+                    type: 'geojson',
+                    data: {
+                        type: 'FeatureCollection',
+                        features: []
+                    }
+                });
+                
+                map.addLayer({
+                    id: 'interpolated-points',
+                    type: 'circle',
+                    source: 'interpolated-points',
+                    paint: {
+                        'circle-radius': 2,
+                        'circle-color': '#00ff00',
+                        'circle-opacity': 0.6
+                    }
+                });
+                
+                // 編集用の点
+                map.addSource('edit-points', {
+                    type: 'geojson',
+                    data: {
+                        type: 'FeatureCollection',
+                        features: []
+                    }
+                });
+                
+                map.addLayer({
+                    id: 'edit-points',
+                    type: 'circle',
+                    source: 'edit-points',
+                    paint: {
+                        'circle-radius': 6,
+                        'circle-color': '#0066ff',
+                        'circle-stroke-width': 2,
+                        'circle-stroke-color': '#ffffff'
+                    }
+                });
+                
+                // 中間点（三角形）
+                map.addSource('mid-points', {
+                    type: 'geojson',
+                    data: {
+                        type: 'FeatureCollection',
+                        features: []
+                    }
+                });
+                
+                map.addLayer({
+                    id: 'mid-points',
+                    type: 'symbol',
+                    source: 'mid-points',
+                    layout: {
+                        'icon-image': 'triangle-11',
+                        'icon-size': 1,
+                        'icon-allow-overlap': true
+                    },
+                    paint: {
+                        'icon-color': '#ff6600'
+                    }
+                });
+                
+                // ダブルクリックイベント
+                map.on('dblclick', 'drawn-line', onLineDoubleClick);
+                
+                // 中間点のドラッグイベント
+                map.on('mousedown', 'mid-points', onMidPointMouseDown);
+                map.on('mousemove', onMouseMove);
+                map.on('mouseup', onMouseUp);
+                
+                // 右クリックメニュー
+                map.on('contextmenu', onContextMenu);
+                
+                updateStatus('地図を読み込みました');
+            });
+        }
+        
+        // 現在地取得
+        function getCurrentLocation() {
+            if (navigator.geolocation) {
+                navigator.geolocation.getCurrentPosition(
+                    (position) => {
+                        const userLocation = [position.coords.longitude, position.coords.latitude];
+                        initMap(userLocation);
+                    },
+                    (error) => {
+                        console.error('位置情報の取得に失敗しました:', error);
+                        // デフォルト位置（東京）
+                        initMap([139.6917, 35.6895]);
+                        updateStatus('位置情報の取得に失敗しました。デフォルト位置を使用します。');
+                    }
+                );
+            } else {
+                // デフォルト位置（東京）
+                initMap([139.6917, 35.6895]);
+                updateStatus('位置情報がサポートされていません。デフォルト位置を使用します。');
+            }
+        }
+        
+        // 描画モードの切り替え
+        function toggleDrawing() {
+            if (isEditing) {
+                confirmEdit();
+            }
+            
+            isDrawing = !isDrawing;
+            const drawBtn = document.getElementById('drawBtn');
+            
+            if (isDrawing) {
+                drawBtn.textContent = '描画を終了する';
+                drawBtn.style.background = '#dc3545';
+                map.on('click', onMapClick);
+                updateStatus('地図をクリックして軌跡を描画してください');
+            } else {
+                drawBtn.textContent = 'GPX軌跡をお絵かきする';
+                drawBtn.style.background = '#007cba';
+                map.off('click', onMapClick);
+                updateStatus('描画を終了しました');
+            }
+            
+            updateButtonStates();
+        }
+        
+        // 地図クリック時の処理
+        function onMapClick(e) {
+            if (!isDrawing || isEditing) return;
+            
+            const coords = [e.lngLat.lng, e.lngLat.lat];
+            
+            // Undoスタックに現在の状態を保存
+            undoStack.push([...drawnCoordinates]);
+            redoStack = []; // 新しい操作でRedoスタックをクリア
+            
+            drawnCoordinates.push(coords);
+            
+            // ラインを更新
+            updateDrawnLine();
+            updateButtonStates();
+            
+            updateStatus(`点数: ${drawnCoordinates.length}`);
+        }
+        
+        // ラインダブルクリック時の処理
+        function onLineDoubleClick(e) {
+            if (isDrawing) return;
+            
+            e.preventDefault();
+            enterEditMode();
+        }
+        
+        // 編集モードに入る
+        function enterEditMode() {
+            if (drawnCoordinates.length < 2) return;
+            
+            isEditing = true;
+            editingPoints = [...drawnCoordinates];
+            
+            // 編集用の点を表示
+            updateEditPoints();
+            updateMidPoints();
+            
+            updateStatus('編集モード: 三角形をドラッグして新規点を追加。Enterキーまたは右クリックで確定');
+        }
+        
+        // 編集用の点を更新
+        function updateEditPoints() {
+            const features = editingPoints.map((coord, index) => ({
+                type: 'Feature',
+                geometry: {
+                    type: 'Point',
+                    coordinates: coord
+                },
+                properties: {
+                    index: index
+                }
+            }));
+            
+            map.getSource('edit-points').setData({
+                type: 'FeatureCollection',
+                features: features
+            });
+        }
+        
+        // 中間点を更新
+        function updateMidPoints() {
+            midPoints = [];
+            const features = [];
+            
+            for (let i = 0; i < editingPoints.length - 1; i++) {
+                const start = editingPoints[i];
+                const end = editingPoints[i + 1];
+                const midPoint = [
+                    (start[0] + end[0]) / 2,
+                    (start[1] + end[1]) / 2
+                ];
+                
+                midPoints.push({
+                    coordinates: midPoint,
+                    insertIndex: i + 1
+                });
+                
+                features.push({
+                    type: 'Feature',
+                    geometry: {
+                        type: 'Point',
+                        coordinates: midPoint
+                    },
+                    properties: {
+                        insertIndex: i + 1
+                    }
+                });
+            }
+            
+            map.getSource('mid-points').setData({
+                type: 'FeatureCollection',
+                features: features
+            });
+        }
+        
+        // 中間点マウスダウン
+        function onMidPointMouseDown(e) {
+            if (!isEditing) return;
+            
+            e.preventDefault();
+            
+            const insertIndex = e.features[0].properties.insertIndex;
+            const coordinates = e.features[0].geometry.coordinates;
+            
+            draggedMidPoint = {
+                insertIndex: insertIndex,
+                originalCoordinates: coordinates
+            };
+            
+            map.getCanvas().style.cursor = 'grabbing';
+        }
+        
+        // マウス移動
+        function onMouseMove(e) {
+            if (!draggedMidPoint || !isEditing) return;
+            
+            const coords = [e.lngLat.lng, e.lngLat.lat];
+            
+            // 中間点の位置を更新
+            const features = map.getSource('mid-points')._data.features;
+            const targetFeature = features.find(f => f.properties.insertIndex === draggedMidPoint.insertIndex);
+            if (targetFeature) {
+                targetFeature.geometry.coordinates = coords;
+                map.getSource('mid-points').setData({
+                    type: 'FeatureCollection',
+                    features: features
+                });
+            }
+        }
+        
+        // マウスアップ
+        function onMouseUp(e) {
+            if (!draggedMidPoint || !isEditing) return;
+            
+            const coords = [e.lngLat.lng, e.lngLat.lat];
+            
+            // 新しい点を挿入
+            undoStack.push([...drawnCoordinates]);
+            redoStack = [];
+            
+            editingPoints.splice(draggedMidPoint.insertIndex, 0, coords);
+            
+            // 表示を更新
+            updateEditPoints();
+            updateMidPoints();
+            updateDrawnLineWithEditPoints();
+            
+            draggedMidPoint = null;
+            map.getCanvas().style.cursor = '';
+            
+            updateStatus(`新規点を追加しました。点数: ${editingPoints.length}`);
+        }
+        
+        // 編集中のラインを更新
+        function updateDrawnLineWithEditPoints() {
+            map.getSource('drawn-line').setData({
+                type: 'Feature',
+                geometry: {
+                    type: 'LineString',
+                    coordinates: editingPoints
+                }
+            });
+        }
+        
+        // 右クリックメニュー
+        function onContextMenu(e) {
+            if (!isEditing) return;
+            
+            e.preventDefault();
+            
+            const menu = document.getElementById('contextMenu');
+            menu.style.display = 'block';
+            menu.style.left = e.point.x + 'px';
+            menu.style.top = e.point.y + 'px';
+        }
+        
+        // 編集確定
+        function confirmEdit() {
+            if (!isEditing) return;
+            
+            drawnCoordinates = [...editingPoints];
+            isEditing = false;
+            
+            // 編集用の表示をクリア
+            map.getSource('edit-points').setData({
+                type: 'FeatureCollection',
+                features: []
+            });
+            
+            map.getSource('mid-points').setData({
+                type: 'FeatureCollection',
+                features: []
+            });
+            
+            // 右クリックメニューを非表示
+            document.getElementById('contextMenu').style.display = 'none';
+            
+            updateDrawnLine();
+            updateButtonStates();
+            
+            updateStatus('編集を確定しました');
+        }
+        
+        // Undo機能
+        function undo() {
+            if (undoStack.length === 0) return;
+            
+            redoStack.push([...drawnCoordinates]);
+            drawnCoordinates = undoStack.pop();
+            
+            updateDrawnLine();
+            updateButtonStates();
+            updateStatus(`Undo実行 - 点数: ${drawnCoordinates.length}`);
+        }
+        
+        // Redo機能
+        function redo() {
+            if (redoStack.length === 0) return;
+            
+            undoStack.push([...drawnCoordinates]);
+            drawnCoordinates = redoStack.pop();
+            
+            updateDrawnLine();
+            updateButtonStates();
+            updateStatus(`Redo実行 - 点数: ${drawnCoordinates.length}`);
+        }
+        
+        // リセット機能
+        function reset() {
+            if (drawnCoordinates.length === 0) return;
+            
+            undoStack.push([...drawnCoordinates]);
+            redoStack = [];
+            drawnCoordinates = [];
+            interpolatedPoints = [];
+            
+            updateDrawnLine();
+            updateInterpolatedPoints();
+            updateButtonStates();
+            updateStatus('軌跡をリセットしました');
+        }
+        
+        // 描画ラインを更新
+        function updateDrawnLine() {
+            map.getSource('drawn-line').setData({
+                type: 'Feature',
+                geometry: {
+                    type: 'LineString',
+                    coordinates: drawnCoordinates
+                }
+            });
+        }
+        
+        // 内挿点を更新
+        function updateInterpolatedPoints() {
+            const features = interpolatedPoints.map(point => ({
+                type: 'Feature',
+                geometry: {
+                    type: 'Point',
+                    coordinates: point.coordinates
+                }
+            }));
+            
+            map.getSource('interpolated-points').setData({
+                type: 'FeatureCollection',
+                features: features
+            });
+        }
+        
+        // ボタンの状態を更新
+        function updateButtonStates() {
+            document.getElementById('undoBtn').disabled = undoStack.length === 0 || isEditing;
+            document.getElementById('redoBtn').disabled = redoStack.length === 0 || isEditing;
+            document.getElementById('resetBtn').disabled = drawnCoordinates.length === 0 || isEditing;
+            document.getElementById('interpolateBtn').disabled = drawnCoordinates.length < 2 || isEditing;
+            document.getElementById('exportBtn').disabled = interpolatedPoints.length === 0 || isEditing;
+            document.getElementById('timeBtn').disabled = isEditing;
+        }
+        function openTimeModal() {
+            const modal = document.getElementById('timeModal');
+            const now = new Date();
+            const later = new Date(now.getTime() + 3600000); // 1時間後
+            
+            document.getElementById('startTime').value = formatDateTimeLocal(now);
+            document.getElementById('endTime').value = formatDateTimeLocal(later);
+            document.getElementById('timezone').value = timezone;
+            
+            modal.style.display = 'flex';
+        }
+        
+        // 時間設定を保存
+        function saveTimeSettings() {
+            const startTimeInput = document.getElementById('startTime').value;
+            const endTimeInput = document.getElementById('endTime').value;
+            const timezoneInput = document.getElementById('timezone').value;
+            
+            if (!startTimeInput || !endTimeInput) {
+                alert('開始時間と終了時間を入力してください');
+                return;
+            }
+            
+            startTime = new Date(startTimeInput);
+            endTime = new Date(endTimeInput);
+            timezone = timezoneInput;
+            
+            if (startTime >= endTime) {
+                alert('終了時間は開始時間より後に設定してください');
+                return;
+            }
+            
+            closeTimeModal();
+            updateStatus(`時間設定完了: ${startTime.toLocaleString()} - ${endTime.toLocaleString()}`);
+        }
+        
+        // モーダルを閉じる
+        function closeTimeModal() {
+            document.getElementById('timeModal').style.display = 'none';
+        }
+        
+        // 空間内挿
+        function interpolateTrack() {
+            if (drawnCoordinates.length < 2) {
+                alert('2点以上の軌跡を描画してください');
+                return;
+            }
+            
+            if (!startTime || !endTime) {
+                alert('開始時間と終了時間を設定してください');
+                return;
+            }
+            
+            const totalDuration = (endTime - startTime) / 1000; // 秒
+            const totalDistance = calculateTotalDistance(drawnCoordinates);
+            
+            interpolatedPoints = [];
+            let currentDistance = 0;
+            
+            for (let i = 0; i < drawnCoordinates.length - 1; i++) {
+                const start = drawnCoordinates[i];
+                const end = drawnCoordinates[i + 1];
+                const segmentDistance = calculateDistance(start, end);
+                
+                const segmentPoints = Math.ceil(segmentDistance / totalDistance * totalDuration);
+                
+                for (let j = 0; j < segmentPoints; j++) {
+                    const ratio = j / segmentPoints;
+                    const interpolatedCoord = [
+                        start[0] + (end[0] - start[0]) * ratio,
+                        start[1] + (end[1] - start[1]) * ratio
+                    ];
+                    
+                    const timeOffset = (currentDistance / totalDistance) * totalDuration * 1000;
+                    const pointTime = new Date(startTime.getTime() + timeOffset);
+                    
+                    interpolatedPoints.push({
+                        coordinates: interpolatedCoord,
+                        time: pointTime
+                    });
+                    
+                    currentDistance += segmentDistance / segmentPoints;
+                }
+            }
+            
+            // 最後の点を追加
+            interpolatedPoints.push({
+                coordinates: drawnCoordinates[drawnCoordinates.length - 1],
+                time: endTime
+            });
+            
+            // 内挿点を地図に表示
+            updateInterpolatedPoints();
+            
+            updateButtonStates();
+            updateStatus(`内挿完了: ${interpolatedPoints.length}点生成`);
+        }
+        
+        // 距離計算（簡易版）
+        function calculateDistance(coord1, coord2) {
+            const R = 6371000; // 地球の半径（メートル）
+            const dLat = (coord2[1] - coord1[1]) * Math.PI / 180;
+            const dLon = (coord2[0] - coord1[0]) * Math.PI / 180;
+            const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                      Math.cos(coord1[1] * Math.PI / 180) * Math.cos(coord2[1] * Math.PI / 180) *
+                      Math.sin(dLon/2) * Math.sin(dLon/2);
+            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+            return R * c;
+        }
+        
+        // 総距離計算
+        function calculateTotalDistance(coordinates) {
+            let totalDistance = 0;
+            for (let i = 0; i < coordinates.length - 1; i++) {
+                totalDistance += calculateDistance(coordinates[i], coordinates[i + 1]);
+            }
+            return totalDistance;
+        }
+        
+        // GPXエクスポート
+        function exportGPX() {
+            if (interpolatedPoints.length === 0) {
+                alert('内挿を実行してからエクスポートしてください');
+                return;
+            }
+            
+            const gpxContent = generateGPX(interpolatedPoints);
+            const blob = new Blob([gpxContent], { type: 'application/gpx+xml' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `gpx_track_${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.gpx`;
+            a.click();
+            URL.revokeObjectURL(url);
+            
+            updateStatus('GPXファイルをエクスポートしました');
+        }
+        
+        // GPX生成
+        function generateGPX(points) {
+            let gpx = `<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="GPX Drawing Tool" xmlns="http://www.topografix.com/GPX/1/1">
+<trk>
+<name>Drawn Track</name>
+<trkseg>`;
+            
+            points.forEach(point => {
+                const timeStr = point.time.toISOString();
+                gpx += `
+<trkpt lat="${point.coordinates[1]}" lon="${point.coordinates[0]}">
+<time>${timeStr}</time>
+</trkpt>`;
+            });
+            
+            gpx += `
+</trkseg>
+</trk>
+</gpx>`;
+            
+            return gpx;
+        }
+        
+        // 日時をinputのdatetime-local形式に変換
+        function formatDateTimeLocal(date) {
+            const year = date.getFullYear();
+            const month = String(date.getMonth() + 1).padStart(2, '0');
+            const day = String(date.getDate()).padStart(2, '0');
+            const hours = String(date.getHours()).padStart(2, '0');
+            const minutes = String(date.getMinutes()).padStart(2, '0');
+            const seconds = String(date.getSeconds()).padStart(2, '0');
+            return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}`;
+        }
+        
+        // ステータス更新
+        function updateStatus(message) {
+            document.getElementById('status').textContent = message;
+        }
+        
+        // イベントリスナー
+        document.getElementById('drawBtn').addEventListener('click', toggleDrawing);
+        document.getElementById('undoBtn').addEventListener('click', undo);
+        document.getElementById('redoBtn').addEventListener('click', redo);
+        document.getElementById('resetBtn').addEventListener('click', reset);
+        document.getElementById('timeBtn').addEventListener('click', openTimeModal);
+        document.getElementById('interpolateBtn').addEventListener('click', interpolateTrack);
+        document.getElementById('exportBtn').addEventListener('click', exportGPX);
+        
+        // Enterキーで編集確定
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && isEditing) {
+                confirmEdit();
+            }
+        });
+        
+        // クリックで右クリックメニューを閉じる
+        document.addEventListener('click', (e) => {
+            if (!e.target.closest('.context-menu')) {
+                document.getElementById('contextMenu').style.display = 'none';
+            }
+        });
+        
+        // 初期化
+        getCurrentLocation();
+    </script>
+</body>
+</html>
