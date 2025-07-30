@@ -433,12 +433,12 @@
             const btn = document.getElementById('drawBtn');
             
             if (isDrawing) {
-                btn.textContent = 'Cancel Drawing';
+                btn.textContent = '軌跡をキャンセル';
                 btn.style.background = '#dc3545';
                 currentTrack = [];
                 map.getCanvas().style.cursor = 'crosshair';
             } else {
-                btn.textContent = 'Draw your track';
+                btn.textContent = '軌跡を描く';
                 btn.style.background = '#007cba';
                 map.getCanvas().style.cursor = '';
                 clearPreview();

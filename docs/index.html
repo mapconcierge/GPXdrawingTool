@@ -114,6 +114,7 @@
         <button id="timeBtn">開始と終了時間を定義する</button>
         <button id="interpolateBtn" disabled>描いたGPX軌跡を空間内挿する</button>
         <button id="exportBtn" disabled>エクスポート</button>
+        <button id="resetBtn" disabled>リセット</button>
         
         <div class="time-input" id="timeInput">
             <label>開始時間:</label>
@@ -123,6 +124,8 @@
                 <option value="Asia/Tokyo">Asia/Tokyo</option>
                 <option value="UTC">UTC</option>
                 <option value="America/New_York">America/New_York</option>
+                <option value="Europe/Milano">Europe/Milano</option>
+                <option value="Europe/Sofia">Europe/Sofia</option>
                 <option value="Europe/London">Europe/London</option>
             </select>
             
@@ -133,6 +136,8 @@
                 <option value="Asia/Tokyo">Asia/Tokyo</option>
                 <option value="UTC">UTC</option>
                 <option value="America/New_York">America/New_York</option>
+                <option value="Europe/Milano">Europe/Milano</option>
+                <option value="Europe/Sofia">Europe/Sofia</option>
                 <option value="Europe/London">Europe/London</option>
             </select>
             
@@ -337,6 +342,9 @@
             });
             
             // マップのクリックイベント
+            document.getElementById('resetBtn').addEventListener('click', () => {
+                resetTrack();
+            });
             map.on('click', handleMapClick);
             map.on('dblclick', handleMapDoubleClick);
             map.on('mousemove', handleMouseMove);
@@ -425,12 +433,12 @@
             const btn = document.getElementById('drawBtn');
             
             if (isDrawing) {
-                btn.textContent = 'Cancel Drawing';
+                btn.textContent = '軌跡をキャンセル';
                 btn.style.background = '#dc3545';
                 currentTrack = [];
                 map.getCanvas().style.cursor = 'crosshair';
             } else {
-                btn.textContent = 'Draw your track';
+                btn.textContent = '軌跡を描く';
                 btn.style.background = '#007cba';
                 map.getCanvas().style.cursor = '';
                 clearPreview();
@@ -443,6 +451,7 @@
                 currentTrack.push(coords);
                 updateTrackDisplay();
                 updateNodes();
+                document.getElementById("resetBtn").disabled = false;
             }
         }
         
@@ -598,6 +607,7 @@
             updateNodes(); // ノードを隠す
             
             if (currentTrack.length > 0) {
+                document.getElementById("resetBtn").disabled = false;
                 document.getElementById('exportBtn').disabled = false;
             }
         }
@@ -630,6 +640,32 @@
             map.off('mousemove', onDragMove);
             map.off('mouseup', onDragEnd);
         }
+        function resetTrack() {
+            isDrawing = false;
+            isEditing = false;
+            currentTrack = [];
+            interpolatedPoints = [];
+            draggedPoint = null;
+            startTime = null;
+            endTime = null;
+            document.getElementById("drawBtn").textContent = "Draw your track";
+            document.getElementById("drawBtn").style.background = "#007cba";
+            document.getElementById("exportBtn").disabled = true;
+            document.getElementById("interpolateBtn").disabled = true;
+            document.getElementById("resetBtn").disabled = true;
+            document.getElementById("timeInput").style.display = "none";
+            document.getElementById("startTime").value = "";
+            document.getElementById("endTime").value = "";
+            map.getCanvas().style.cursor = "";
+            clearPreview();
+            map.getSource("track").setData({type:"FeatureCollection",features:[]});
+            map.getSource("nodes").setData({type:"FeatureCollection",features:[]});
+            map.getSource("midpoints").setData({type:"FeatureCollection",features:[]});
+            map.getSource("interpolated").setData({type:"FeatureCollection",features:[]});
+            updateNodes();
+            updateMidpoints();
+        }
+
         
         function confirmTimeSettings() {
             const startTimeInput = document.getElementById('startTime').value;
