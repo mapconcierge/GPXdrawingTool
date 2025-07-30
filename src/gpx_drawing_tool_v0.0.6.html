@@ -1,0 +1,842 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GPX Track Drawing Tool</title>
+    <script src="https://unpkg.com/maplibre-gl@^5.6.1/dist/maplibre-gl.js"></script>
+    <link href="https://unpkg.com/maplibre-gl@^5.6.1/dist/maplibre-gl.css" rel="stylesheet">
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: Arial, sans-serif;
+        }
+        
+        #map {
+            width: 100vw;
+            height: 100vh;
+        }
+        
+        .controls {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            z-index: 1000;
+            background: rgba(255, 255, 255, 0.9);
+            padding: 15px;
+            border-radius: 5px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+        }
+        
+        .controls button {
+            margin: 5px;
+            padding: 8px 16px;
+            background: #007cba;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        
+        .controls button:hover {
+            background: #005a87;
+        }
+        
+        .controls button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        
+        .time-input {
+            margin: 10px 0;
+            padding: 10px;
+            background: rgba(240, 240, 240, 0.95);
+            border-radius: 4px;
+            display: none;
+        }
+        
+        .time-input label {
+            display: block;
+            margin: 5px 0;
+            font-weight: bold;
+        }
+        
+        .time-input input, .time-input select {
+            width: 100%;
+            padding: 5px;
+            margin: 3px 0;
+            border: 1px solid #ccc;
+            border-radius: 3px;
+        }
+        
+        .context-menu {
+            position: absolute;
+            background: white;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+            z-index: 2000;
+            display: none;
+        }
+        
+        .context-menu div {
+            padding: 8px 12px;
+            cursor: pointer;
+            border-bottom: 1px solid #eee;
+        }
+        
+        .context-menu div:hover {
+            background: #f0f0f0;
+        }
+        
+        .context-menu div:last-child {
+            border-bottom: none;
+        }
+        
+        .tooltip {
+            position: absolute;
+            background: rgba(0, 0, 0, 0.8);
+            color: white;
+            padding: 5px 10px;
+            border-radius: 4px;
+            font-size: 12px;
+            pointer-events: none;
+            z-index: 1500;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="controls">
+        <button id="drawBtn">Draw your track</button>
+        <button id="timeBtn">開始と終了時間を定義する</button>
+        <button id="interpolateBtn" disabled>描いたGPX軌跡を空間内挿する</button>
+        <button id="exportBtn" disabled>エクスポート</button>
+        <button id="resetBtn" disabled>リセット</button>
+        
+        <div class="time-input" id="timeInput">
+            <label>開始時間:</label>
+            <input type="datetime-local" id="startTime">
+            <label>タイムゾーン:</label>
+            <select id="startTimezone">
+                <option value="Asia/Tokyo">Asia/Tokyo</option>
+                <option value="UTC">UTC</option>
+                <option value="America/New_York">America/New_York</option>
+                <option value="Europe/Milano">Europe/Milano</option>
+                <option value="Europe/Sofia">Europe/Sofia</option>
+                <option value="Europe/London">Europe/London</option>
+            </select>
+            
+            <label>終了時間:</label>
+            <input type="datetime-local" id="endTime">
+            <label>タイムゾーン:</label>
+            <select id="endTimezone">
+                <option value="Asia/Tokyo">Asia/Tokyo</option>
+                <option value="UTC">UTC</option>
+                <option value="America/New_York">America/New_York</option>
+                <option value="Europe/Milano">Europe/Milano</option>
+                <option value="Europe/Sofia">Europe/Sofia</option>
+                <option value="Europe/London">Europe/London</option>
+            </select>
+            
+            <button id="confirmTimeBtn">時間設定を確定</button>
+        </div>
+    </div>
+    
+    <div class="context-menu" id="contextMenu">
+        <div id="editTrack">編集</div>
+        <div id="confirmEdit" style="display: none;">編集確定</div>
+    </div>
+    
+    <div class="tooltip" id="tooltip"></div>
+    
+    <div id="map"></div>
+
+    <script>
+        let map;
+        let isDrawing = false;
+        let isEditing = false;
+        let currentTrack = [];
+        let previewLine = null;
+        let startTime = null;
+        let endTime = null;
+        let interpolatedPoints = [];
+        let draggedPoint = null;
+        
+        // マップの初期化
+        function initMap() {
+            // 現在地の取得
+            if (navigator.geolocation) {
+                navigator.geolocation.getCurrentPosition(
+                    (position) => {
+                        const { latitude, longitude } = position.coords;
+                        createMap(longitude, latitude);
+                    },
+                    (error) => {
+                        console.error('位置情報の取得に失敗しました:', error);
+                        // デフォルト位置（東京）
+                        createMap(139.7671, 35.6812);
+                    }
+                );
+            } else {
+                // デフォルト位置（東京）
+                createMap(139.7671, 35.6812);
+            }
+        }
+        
+        function createMap(lng, lat) {
+            map = new maplibregl.Map({
+                container: 'map',
+                style: 'https://tiles.openfreemap.org/styles/liberty',
+                center: [lng, lat],
+                zoom: 15
+            });
+            
+            map.on('load', () => {
+                setupMapSources();
+                setupEventListeners();
+            });
+        }
+        
+        function setupMapSources() {
+            // トラック用のソース
+            map.addSource('track', {
+                type: 'geojson',
+                data: {
+                    type: 'FeatureCollection',
+                    features: []
+                }
+            });
+            
+            // ノード用のソース
+            map.addSource('nodes', {
+                type: 'geojson',
+                data: {
+                    type: 'FeatureCollection',
+                    features: []
+                }
+            });
+            
+            // プレビューライン用のソース
+            map.addSource('preview', {
+                type: 'geojson',
+                data: {
+                    type: 'FeatureCollection',
+                    features: []
+                }
+            });
+            
+            // 中間点追加用マーカー
+            map.addSource('midpoints', {
+                type: 'geojson',
+                data: {
+                    type: 'FeatureCollection',
+                    features: []
+                }
+            });
+            
+            // 内挿点用のソース
+            map.addSource('interpolated', {
+                type: 'geojson',
+                data: {
+                    type: 'FeatureCollection',
+                    features: []
+                }
+            });
+            
+            // レイヤーの追加
+            map.addLayer({
+                id: 'track-line',
+                type: 'line',
+                source: 'track',
+                layout: {
+                    'line-join': 'round',
+                    'line-cap': 'round'
+                },
+                paint: {
+                    'line-color': '#007cba',
+                    'line-width': 3
+                }
+            });
+            
+            map.addLayer({
+                id: 'preview-line',
+                type: 'line',
+                source: 'preview',
+                layout: {
+                    'line-join': 'round',
+                    'line-cap': 'round'
+                },
+                paint: {
+                    'line-color': '#007cba',
+                    'line-width': 2,
+                    'line-dasharray': [2, 2]
+                }
+            });
+            
+            map.addLayer({
+                id: 'nodes',
+                type: 'circle',
+                source: 'nodes',
+                paint: {
+                    'circle-radius': 6,
+                    'circle-color': '#007cba',
+                    'circle-stroke-color': '#fff',
+                    'circle-stroke-width': 2
+                }
+            });
+            
+            map.addLayer({
+                id: 'midpoints',
+                type: 'symbol',
+                source: 'midpoints',
+                layout: {
+                    'text-field': '▲',
+                    'text-size': 12,
+                    'text-allow-overlap': true
+                },
+                paint: {
+                    'text-color': '#ff6b6b'
+                }
+            });
+            
+            map.addLayer({
+                id: 'interpolated-points',
+                type: 'circle',
+                source: 'interpolated',
+                paint: {
+                    'circle-radius': 2,
+                    'circle-color': '#ff6b6b',
+                    'circle-opacity': 0.7
+                }
+            });
+        }
+        
+        function setupEventListeners() {
+            // 描画ボタン
+            document.getElementById('drawBtn').addEventListener('click', () => {
+                toggleDrawing();
+            });
+            
+            // 時間設定ボタン
+            document.getElementById('timeBtn').addEventListener('click', () => {
+                const timeInput = document.getElementById('timeInput');
+                timeInput.style.display = timeInput.style.display === 'none' ? 'block' : 'none';
+            });
+            
+            // 時間確定ボタン
+            document.getElementById('confirmTimeBtn').addEventListener('click', () => {
+                confirmTimeSettings();
+            });
+            
+            // 内挿ボタン
+            document.getElementById('interpolateBtn').addEventListener('click', () => {
+                interpolateTrack();
+            });
+            
+            // エクスポートボタン
+            document.getElementById('exportBtn').addEventListener('click', () => {
+                exportGPX();
+            });
+            
+            // マップのクリックイベント
+            document.getElementById('resetBtn').addEventListener('click', () => {
+                resetTrack();
+            });
+            map.on('click', handleMapClick);
+            map.on('dblclick', handleMapDoubleClick);
+            map.on('mousemove', handleMouseMove);
+            map.on('contextmenu', handleContextMenu);
+            
+            // キーボードイベント
+            document.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    if (isDrawing) {
+                        finishDrawing();
+                    } else if (isEditing) {
+                        finishEditing();
+                    }
+                }
+            });
+            
+            // ノードのドラッグ機能
+            map.on('mousedown', 'nodes', (e) => {
+                if (isEditing) {
+                    e.preventDefault();
+                    draggedPoint = e.features[0];
+                    map.getCanvas().style.cursor = 'grabbing';
+                    
+                    map.on('mousemove', onDragMove);
+                    map.on('mouseup', onDragEnd);
+                }
+            });
+            
+            // 中間点のドラッグ機能
+            map.on('mousedown', 'midpoints', (e) => {
+                if (isEditing) {
+                    e.preventDefault();
+                    const feature = e.features[0];
+                    const newPoint = {
+                        type: 'Feature',
+                        geometry: {
+                            type: 'Point',
+                            coordinates: [e.lngLat.lng, e.lngLat.lat]
+                        },
+                        properties: {
+                            index: feature.properties.afterIndex
+                        }
+                    };
+                    
+                    // 新しい点を追加
+                    currentTrack.splice(feature.properties.afterIndex, 0, [e.lngLat.lng, e.lngLat.lat]);
+                    updateTrackDisplay();
+                    updateEditingNodes();
+                    updateMidpoints();
+                }
+            });
+            
+            // 内挿点のマウスオーバー
+            map.on('mousemove', 'interpolated-points', (e) => {
+                if (e.features.length > 0) {
+                    const feature = e.features[0];
+                    const tooltip = document.getElementById('tooltip');
+                    tooltip.innerHTML = feature.properties.timestamp;
+                    tooltip.style.left = e.point.x + 10 + 'px';
+                    tooltip.style.top = e.point.y - 30 + 'px';
+                    tooltip.style.display = 'block';
+                }
+            });
+            
+            map.on('mouseleave', 'interpolated-points', () => {
+                document.getElementById('tooltip').style.display = 'none';
+            });
+            
+            // コンテキストメニュー
+            document.getElementById('editTrack').addEventListener('click', () => {
+                startEditing();
+                hideContextMenu();
+            });
+            
+            document.getElementById('confirmEdit').addEventListener('click', () => {
+                finishEditing();
+                hideContextMenu();
+            });
+            
+            // マップクリックでコンテキストメニューを隠す
+            map.on('click', hideContextMenu);
+        }
+        
+        function toggleDrawing() {
+            isDrawing = !isDrawing;
+            const btn = document.getElementById('drawBtn');
+            
+            if (isDrawing) {
+                btn.textContent = 'Cancel Drawing';
+                btn.style.background = '#dc3545';
+                currentTrack = [];
+                map.getCanvas().style.cursor = 'crosshair';
+            } else {
+                btn.textContent = 'Draw your track';
+                btn.style.background = '#007cba';
+                map.getCanvas().style.cursor = '';
+                clearPreview();
+            }
+        }
+        
+        function handleMapClick(e) {
+            if (isDrawing) {
+                const coords = [e.lngLat.lng, e.lngLat.lat];
+                currentTrack.push(coords);
+                updateTrackDisplay();
+                updateNodes();
+                document.getElementById("resetBtn").disabled = false;
+            }
+        }
+        
+        function handleMapDoubleClick(e) {
+            if (isDrawing) {
+                finishDrawing();
+            } else if (currentTrack.length > 0 && !isEditing) {
+                // トラックの編集開始
+                startEditing();
+            }
+        }
+        
+        function handleMouseMove(e) {
+            if (isDrawing && currentTrack.length > 0) {
+                updatePreview(e.lngLat);
+            }
+        }
+        
+        function handleContextMenu(e) {
+            e.preventDefault();
+            if (currentTrack.length > 0 && !isDrawing) {
+                const menu = document.getElementById('contextMenu');
+                menu.style.left = e.point.x + 'px';
+                menu.style.top = e.point.y + 'px';
+                menu.style.display = 'block';
+                
+                if (isEditing) {
+                    document.getElementById('editTrack').style.display = 'none';
+                    document.getElementById('confirmEdit').style.display = 'block';
+                } else {
+                    document.getElementById('editTrack').style.display = 'block';
+                    document.getElementById('confirmEdit').style.display = 'none';
+                }
+            }
+        }
+        
+        function hideContextMenu() {
+            document.getElementById('contextMenu').style.display = 'none';
+        }
+        
+        function updatePreview(lngLat) {
+            if (currentTrack.length > 0) {
+                const lastPoint = currentTrack[currentTrack.length - 1];
+                const previewData = {
+                    type: 'FeatureCollection',
+                    features: [{
+                        type: 'Feature',
+                        geometry: {
+                            type: 'LineString',
+                            coordinates: [lastPoint, [lngLat.lng, lngLat.lat]]
+                        }
+                    }]
+                };
+                map.getSource('preview').setData(previewData);
+            }
+        }
+        
+        function clearPreview() {
+            map.getSource('preview').setData({
+                type: 'FeatureCollection',
+                features: []
+            });
+        }
+        
+        function updateTrackDisplay() {
+            if (currentTrack.length > 1) {
+                const trackData = {
+                    type: 'FeatureCollection',
+                    features: [{
+                        type: 'Feature',
+                        geometry: {
+                            type: 'LineString',
+                            coordinates: currentTrack
+                        }
+                    }]
+                };
+                map.getSource('track').setData(trackData);
+            }
+        }
+        
+        function updateNodes() {
+            if (isDrawing || isEditing) {
+                const nodeFeatures = currentTrack.map((coord, index) => ({
+                    type: 'Feature',
+                    geometry: {
+                        type: 'Point',
+                        coordinates: coord
+                    },
+                    properties: {
+                        index: index
+                    }
+                }));
+                
+                const nodeData = {
+                    type: 'FeatureCollection',
+                    features: nodeFeatures
+                };
+                map.getSource('nodes').setData(nodeData);
+            } else {
+                map.getSource('nodes').setData({
+                    type: 'FeatureCollection',
+                    features: []
+                });
+            }
+        }
+        
+        function updateEditingNodes() {
+            if (isEditing) {
+                updateNodes();
+            }
+        }
+        
+        function updateMidpoints() {
+            if (isEditing && currentTrack.length > 1) {
+                const midpointFeatures = [];
+                for (let i = 0; i < currentTrack.length - 1; i++) {
+                    const p1 = currentTrack[i];
+                    const p2 = currentTrack[i + 1];
+                    const midpoint = [(p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2];
+                    
+                    midpointFeatures.push({
+                        type: 'Feature',
+                        geometry: {
+                            type: 'Point',
+                            coordinates: midpoint
+                        },
+                        properties: {
+                            afterIndex: i + 1
+                        }
+                    });
+                }
+                
+                const midpointData = {
+                    type: 'FeatureCollection',
+                    features: midpointFeatures
+                };
+                map.getSource('midpoints').setData(midpointData);
+            } else {
+                map.getSource('midpoints').setData({
+                    type: 'FeatureCollection',
+                    features: []
+                });
+            }
+        }
+        
+        function finishDrawing() {
+            isDrawing = false;
+            const btn = document.getElementById('drawBtn');
+            btn.textContent = 'Draw your track';
+            btn.style.background = '#007cba';
+            map.getCanvas().style.cursor = '';
+            clearPreview();
+            updateNodes(); // ノードを隠す
+            
+            if (currentTrack.length > 0) {
+                document.getElementById("resetBtn").disabled = false;
+                document.getElementById('exportBtn').disabled = false;
+            }
+        }
+        
+        function startEditing() {
+            isEditing = true;
+            updateEditingNodes();
+            updateMidpoints();
+        }
+        
+        function finishEditing() {
+            isEditing = false;
+            updateNodes(); // ノードを隠す
+            updateMidpoints(); // 中間点を隠す
+        }
+        
+        function onDragMove(e) {
+            if (draggedPoint) {
+                const coords = [e.lngLat.lng, e.lngLat.lat];
+                currentTrack[draggedPoint.properties.index] = coords;
+                updateTrackDisplay();
+                updateEditingNodes();
+                updateMidpoints();
+            }
+        }
+        
+        function onDragEnd() {
+            draggedPoint = null;
+            map.getCanvas().style.cursor = '';
+            map.off('mousemove', onDragMove);
+            map.off('mouseup', onDragEnd);
+        }
+        function resetTrack() {
+            isDrawing = false;
+            isEditing = false;
+            currentTrack = [];
+            interpolatedPoints = [];
+            draggedPoint = null;
+            startTime = null;
+            endTime = null;
+            document.getElementById("drawBtn").textContent = "Draw your track";
+            document.getElementById("drawBtn").style.background = "#007cba";
+            document.getElementById("exportBtn").disabled = true;
+            document.getElementById("interpolateBtn").disabled = true;
+            document.getElementById("resetBtn").disabled = true;
+            document.getElementById("timeInput").style.display = "none";
+            document.getElementById("startTime").value = "";
+            document.getElementById("endTime").value = "";
+            map.getCanvas().style.cursor = "";
+            clearPreview();
+            map.getSource("track").setData({type:"FeatureCollection",features:[]});
+            map.getSource("nodes").setData({type:"FeatureCollection",features:[]});
+            map.getSource("midpoints").setData({type:"FeatureCollection",features:[]});
+            map.getSource("interpolated").setData({type:"FeatureCollection",features:[]});
+            updateNodes();
+            updateMidpoints();
+        }
+
+        
+        function confirmTimeSettings() {
+            const startTimeInput = document.getElementById('startTime').value;
+            const endTimeInput = document.getElementById('endTime').value;
+            const startTimezone = document.getElementById('startTimezone').value;
+            const endTimezone = document.getElementById('endTimezone').value;
+            
+            if (startTimeInput && endTimeInput) {
+                startTime = {
+                    time: new Date(startTimeInput),
+                    timezone: startTimezone
+                };
+                endTime = {
+                    time: new Date(endTimeInput),
+                    timezone: endTimezone
+                };
+                
+                document.getElementById('timeInput').style.display = 'none';
+                
+                if (currentTrack.length > 0) {
+                    document.getElementById('interpolateBtn').disabled = false;
+                }
+                
+                alert('時間設定が確定されました');
+            } else {
+                alert('開始時間と終了時間を入力してください');
+            }
+        }
+        
+        function interpolateTrack() {
+            if (currentTrack.length < 2 || !startTime || !endTime) {
+                alert('トラックを描画し、時間設定を完了してください');
+                return;
+            }
+            
+            interpolatedPoints = [];
+            const totalDuration = endTime.time - startTime.time; // ミリ秒
+            const totalPoints = Math.floor(totalDuration / 1000); // 1秒間隔
+            
+            if (totalPoints <= 0) {
+                alert('終了時間は開始時間より後に設定してください');
+                return;
+            }
+            
+            // 各セグメントの距離を計算
+            const distances = [];
+            let totalDistance = 0;
+            for (let i = 0; i < currentTrack.length - 1; i++) {
+                const d = calculateDistance(currentTrack[i], currentTrack[i + 1]);
+                distances.push(d);
+                totalDistance += d;
+            }
+            
+            // 時間に基づく内挿
+            for (let i = 0; i <= totalPoints; i++) {
+                const ratio = i / totalPoints;
+                const targetDistance = ratio * totalDistance;
+                const coords = interpolateByDistance(currentTrack, distances, targetDistance);
+                const timestamp = new Date(startTime.time.getTime() + i * 1000);
+                
+                interpolatedPoints.push({
+                    coordinates: coords,
+                    timestamp: timestamp.toISOString()
+                });
+            }
+            
+            // 内挿点を表示
+            const interpolatedFeatures = interpolatedPoints.map(point => ({
+                type: 'Feature',
+                geometry: {
+                    type: 'Point',
+                    coordinates: point.coordinates
+                },
+                properties: {
+                    timestamp: point.timestamp
+                }
+            }));
+            
+            const interpolatedData = {
+                type: 'FeatureCollection',
+                features: interpolatedFeatures
+            };
+            map.getSource('interpolated').setData(interpolatedData);
+        }
+        
+        function calculateDistance(coord1, coord2) {
+            const R = 6371000; // 地球の半径（メートル）
+            const lat1 = coord1[1] * Math.PI / 180;
+            const lat2 = coord2[1] * Math.PI / 180;
+            const deltaLat = (coord2[1] - coord1[1]) * Math.PI / 180;
+            const deltaLng = (coord2[0] - coord1[0]) * Math.PI / 180;
+            
+            const a = Math.sin(deltaLat/2) * Math.sin(deltaLat/2) +
+                     Math.cos(lat1) * Math.cos(lat2) *
+                     Math.sin(deltaLng/2) * Math.sin(deltaLng/2);
+            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+            
+            return R * c;
+        }
+        
+        function interpolateByDistance(track, distances, targetDistance) {
+            let currentDistance = 0;
+            
+            for (let i = 0; i < distances.length; i++) {
+                if (currentDistance + distances[i] >= targetDistance) {
+                    const ratio = (targetDistance - currentDistance) / distances[i];
+                    const p1 = track[i];
+                    const p2 = track[i + 1];
+                    
+                    return [
+                        p1[0] + (p2[0] - p1[0]) * ratio,
+                        p1[1] + (p2[1] - p1[1]) * ratio
+                    ];
+                }
+                currentDistance += distances[i];
+            }
+            
+            return track[track.length - 1];
+        }
+        
+        function exportGPX() {
+            if (currentTrack.length === 0) {
+                alert('トラックを描画してください');
+                return;
+            }
+            
+            const points = interpolatedPoints.length > 0 ? interpolatedPoints : 
+                currentTrack.map((coord, index) => ({
+                    coordinates: coord,
+                    timestamp: startTime ? new Date(startTime.time.getTime() + index * 60000).toISOString() : null
+                }));
+            
+            const gpxContent = generateGPX(points);
+            downloadFile(gpxContent, 'track.gpx', 'application/gpx+xml');
+        }
+        
+        function generateGPX(points) {
+            let gpx = `<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="GPX Track Drawing Tool">
+<trk>
+<name>Drawn Track</name>
+<trkseg>`;
+            
+            points.forEach(point => {
+                const lat = point.coordinates[1];
+                const lon = point.coordinates[0];
+                const time = point.timestamp ? `<time>${point.timestamp}</time>` : '';
+                gpx += `<trkpt lat="${lat}" lon="${lon}">${time}</trkpt>\n`;
+            });
+            
+            gpx += `</trkseg>
+</trk>
+</gpx>`;
+            
+            return gpx;
+        }
+        
+        function downloadFile(content, filename, mimeType) {
+            const blob = new Blob([content], { type: mimeType });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }
+        
+        // 初期化
+        initMap();
+    </script>
+</body>
+</html>
